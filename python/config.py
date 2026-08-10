@@ -1,0 +1,65 @@
+import os
+
+ACTIVE_MODEL_NAME = 'vgg_multihead'
+
+# HCQT CONFIG
+
+SAMPLE_RATE = 44100
+HOP_LENGTH = 512
+N_BINS = 84
+BINS_PER_OCTAVE = 12
+N_HARMONICS = 5
+CQT_HOP = 512
+
+# TRAINING CONFIG
+
+FINAL_DATASET_DIR = './Dataset'
+
+TRAIN_AUDIO_DIR = os.path.join(FINAL_DATASET_DIR, 'Training', 'train_data')
+TRAIN_LABEL_DIR = os.path.join(FINAL_DATASET_DIR, 'Training', 'train_labels')
+
+VAL_AUDIO_DIR = os.path.join(FINAL_DATASET_DIR, 'Validation', 'validation_data')
+VAL_LABEL_DIR = os.path.join(FINAL_DATASET_DIR, 'Validation', 'validation_labels')
+
+TEST_AUDIO_DIR = os.path.join(FINAL_DATASET_DIR, 'Testing', 'test_data')
+TEST_LABEL_DIR = os.path.join(FINAL_DATASET_DIR, 'Testing', 'test_labels')
+
+INSTRUMENTS_LABELS = ['Piano', 'Violin', 'Cello', 'Viola', 'Contrabass', 'Clarinet', 'Bassoon','Oboe', 'Flute', 'French Horn', 'Trumpet']
+
+BATCH_SIZE = 32
+EPOCHS = 30
+LEARNING_RATE = 0.0021963789036605324
+NUM_INSTRUMENTS = 11
+GRAD_CLIP_NORM = 1
+FRAME_SIZE_MS = 500
+HOP_SIZE_MS = 500
+
+USE_CACHE = True
+CACHE_DIR = './cache'
+CACHE_NAME = f"{N_HARMONICS}_{SAMPLE_RATE}_{HOP_LENGTH}_{N_BINS}_{BINS_PER_OCTAVE}"
+
+LABEL_SMOOTHING = 0.02
+RANDOM_STATE = 42
+
+OPTIM_WEIGHT_DECAY = 2.1503642094991787e-05
+OPTIM_EPS = 1e-8
+
+ES_PATIENCE = 6
+ES_DELTA = 0.0001
+ES_METRIC = 'Loss'
+
+WARMUP_EPOCHS = 5
+
+LRS_MODE = 'min'
+LRS_FACTOR = 0.1
+LRS_PATIENCE = 3
+
+NUM_WORKERS = 8
+PREFETCH_FACTOR = 4
+PERSISTENT_WORKERS = True
+
+CQT_FRAME_DURATION_MS = (CQT_HOP / SAMPLE_RATE) * 1000
+TEMPORAL_TOLERANCE_MS = 100
+
+FREQ_MASK_PARAM = 0.0
+TIME_MASK_PARAM = 0.0
