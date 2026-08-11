@@ -5,11 +5,52 @@ import matplotlib.pyplot as plt
 from config import *
 
 def load_audio_file(file_path, sample_rate=SAMPLE_RATE):
-    y, sample_rate = librosa.load(file_path, sr=sample_rate, mono=True)
-    return y, sample_rate
+    """
+    Parameters:
+    -----------
+    file_path : str
+        Path to the audio file
+    sample_rate : int
+        Target sampling rate
+
+    Returns:
+    --------
+    y : np.ndarray
+        Audio time series
+    sample_rate : int
+        Sampling rate
+    """
+    try:
+        y, sample_rate = librosa.load(file_path, sr=sample_rate, mono=True)
+        return y, sample_rate
+
+    except Exception as e:
+        print(f"Error loading audio file: {e}")
+        return None, None
 
 
 def compute_cqt(y, sample_rate, hop_length, n_bins=N_BINS, bins_per_octave=BINS_PER_OCTAVE, fmin=None):
+    """
+    Parameters:
+    -----------
+    y : np.ndarray
+        Audio time series
+    sample_rate : int
+        Sampling rate
+    hop_length : int
+        Number of samples between successive frames
+    n_bins : int
+        Number of frequency bins
+    bins_per_octave : int
+        Number of bins per octave
+    fmin : float or None
+        Minimum frequency. If None, defaults to C1 (~32.7 Hz)
+
+    Returns:
+    --------
+    CQT : np.ndarray
+        Constant-Q transform
+    """
     if fmin is None:
         fmin = librosa.note_to_hz('C1')
 
@@ -24,6 +65,31 @@ def compute_cqt(y, sample_rate, hop_length, n_bins=N_BINS, bins_per_octave=BINS_
 
 def compute_hcqt(y, sample_rate, n_harmonics=N_HARMONICS, hop_length=HOP_LENGTH,
                  n_bins=N_BINS, bins_per_octave=BINS_PER_OCTAVE, fmin=None):
+    """
+    Parameters:
+    -----------
+    y : np.ndarray
+        Audio time series
+    sample_rate : int
+        Sampling rate
+    n_harmonics : int
+        Number of harmonics to compute (including fundamental)
+    hop_length : int
+        Number of samples between successive frames
+    n_bins : int
+        Number of frequency bins
+    bins_per_octave : int
+        Number of bins per octave
+    fmin : float or None
+        Minimum frequency for the fundamental. If None, defaults to C1 (~32.7 Hz)
+
+    Returns:
+    --------
+    HCQT : np.ndarray
+        Harmonic Constant-Q transform with shape (n_harmonics, n_bins, n_frames)
+    frame_times : np.ndarray
+        Time stamps for each frame in seconds
+    """
     if fmin is None:
         fmin = librosa.note_to_hz('C1')
 
@@ -54,6 +120,29 @@ def compute_hcqt(y, sample_rate, n_harmonics=N_HARMONICS, hop_length=HOP_LENGTH,
 
 
 def extract_frames_from_hcqt(hcqt, frame_times, frame_size_ms, hop_size_ms, sample_rate):
+    """
+    Extract overlapping frames from full HCQT efficiently.
+
+    Parameters:
+    -----------
+    hcqt : np.ndarray
+        Full HCQT with shape (n_harmonics, n_bins, n_frames)
+    frame_times : np.ndarray
+        Time stamps for each HCQT frame
+    frame_size_ms : float
+        Frame size in milliseconds
+    hop_size_ms : float
+        Hop size in milliseconds
+    sample_rate : int
+        Audio sample rate
+
+    Returns:
+    --------
+    frame_hcqts : list
+        List of HCQT frames
+    frame_start_times : list
+        List of start times for each frame in seconds
+    """
     frame_size_sec = frame_size_ms / 1000.0
     hop_size_sec = hop_size_ms / 1000.0
 
@@ -85,6 +174,37 @@ def extract_frames_from_hcqt(hcqt, frame_times, frame_size_ms, hop_size_ms, samp
 
 def segment_and_compute_hcqt(y, sample_rate, frame_size_ms, hop_size_ms, n_harmonics=N_HARMONICS,
                              cqt_hop=CQT_HOP, n_bins=N_BINS, bins_per_octave=BINS_PER_OCTAVE, fmin=None):
+    """
+    Compute full HCQT first, then extract frames.
+
+    Parameters:
+    -----------
+    y : np.ndarray
+        Audio time series
+    sample_rate : int
+        Sampling rate
+    frame_size_ms : float
+        Frame size in milliseconds
+    hop_size_ms : float
+        Hop size in milliseconds
+    n_harmonics : int
+        Number of harmonics for HCQT
+    cqt_hop : int
+        Hop length for CQT computation
+    n_bins : int
+        Number of frequency bins
+    bins_per_octave : int
+        Number of bins per octave
+    fmin : float or None
+        Minimum frequency for the fundamental
+
+    Returns:
+    --------
+    frame_hcqts : list
+        List of HCQT for each frame
+    frame_times : list
+        List of start times for each frame in seconds
+    """
     full_hcqt, hcqt_frame_times = compute_hcqt(
         y, sample_rate, n_harmonics=n_harmonics, hop_length=cqt_hop,
         n_bins=n_bins, bins_per_octave=bins_per_octave, fmin=fmin
@@ -97,6 +217,18 @@ def segment_and_compute_hcqt(y, sample_rate, frame_size_ms, hop_size_ms, n_harmo
     return frame_hcqts, frame_start_times
 
 def visualize_frame(frame_hcqt, frame_idx, start_time, save_dir=None):
+    """
+    Parameters:
+    -----------
+    frame_hcqt : np.ndarray
+        HCQT for a single frame with shape (n_harmonics, n_bins, n_frames)
+    frame_idx : int
+        Frame index number
+    start_time : float
+        Start time of the frame in seconds
+    save_dir : str or None
+        Directory to save the image. If None, just display.
+    """
     plt.figure(figsize=(12, 8))
 
     combined_hcqt = np.sum(frame_hcqt, axis=0)
@@ -123,6 +255,18 @@ def visualize_frame(frame_hcqt, frame_idx, start_time, save_dir=None):
 
 
 def visualize_frames(frame_hcqts, frame_times, save_dir=None, max_frames=None):
+    """
+    Parameters:
+    -----------
+    frame_hcqts : list
+        List of HCQT for each frame
+    frame_times : list
+        List of start times for each frame in seconds
+    save_dir : str or None
+        Directory to save the images. If None, just display.
+    max_frames : int or None
+        Maximum number of frames to visualize. If None, visualize all frames.
+    """
     if max_frames is None:
         frames_to_vis = len(frame_hcqts)
     else:
@@ -137,7 +281,28 @@ def visualize_frames(frame_hcqts, frame_times, save_dir=None, max_frames=None):
         )
 
 
-def process_song(file_path, frame_size_ms, hop_size_ms, n_harmonics=N_HARMONICS):
+def process_musicnet_file(file_path, frame_size_ms, hop_size_ms, n_harmonics=N_HARMONICS):
+    """
+    Parameters:
+    -----------
+    file_path : str
+        Path to the MusicNet audio file
+    frame_size_ms : float
+        Frame size in milliseconds
+    hop_size_ms : float
+        Hop size in milliseconds
+    n_harmonics : int
+        Number of harmonics for HCQT
+
+    Returns:
+    --------
+    frame_hcqts : list
+        List of HCQT for each frame
+    sr : int
+        Sampling rate
+    frame_times : list
+        List of start times for each frame in seconds
+    """
     y, sample_rate = load_audio_file(file_path)
 
     pad_duration_ms = frame_size_ms
@@ -156,6 +321,9 @@ def process_song(file_path, frame_size_ms, hop_size_ms, n_harmonics=N_HARMONICS)
 
 
 def ms_to_samples(ms, sample_rate):
+    """
+    Convert milliseconds to samples.
+    """
     return int((ms / 1000.0) * sample_rate)
 
 
@@ -171,7 +339,7 @@ def main():
     print(f"Processing file: {musicnet_file}")
     print(f"Parameters: frame_size={frame_size_ms} ms, hop_size={hop_size_ms} ms, n_harmonics={n_harmonics}")
 
-    frame_hcqts, sr, frame_times = process_song(
+    frame_hcqts, sr, frame_times = process_musicnet_file(
         file_path=musicnet_file,
         frame_size_ms=frame_size_ms,
         hop_size_ms=hop_size_ms,
