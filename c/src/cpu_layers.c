@@ -13,6 +13,8 @@
 #include <immintrin.h>
 #endif
 
+// Allocates memory aligned to <alignment> bytes so the NEON and SSE loads can use aligned addresses.
+// Falls back to plain malloc if the aligned allocation fails.
 void* aligned_malloc(size_t size, size_t alignment) {
     void* ptr = NULL;
     if (posix_memalign(&ptr, alignment, size) != 0) {
@@ -21,10 +23,12 @@ void* aligned_malloc(size_t size, size_t alignment) {
     return ptr;
 }
 
+// posix_memalign memory is released with a normal free.
 void aligned_free(void* ptr) {
     free(ptr);
 }
 
+// Works out the sizes and strides once per layer so conv2d_cpu_opt does not repeat the multiplications for every output value.
 void precompute_layer_opt_params(LayerOptParams* opt_params, const LayerParams* params) {
     opt_params->input_channel_size = params->h_in * params->w_in;
     opt_params->output_channel_size = params->h_out * params->w_out;
@@ -34,6 +38,14 @@ void precompute_layer_opt_params(LayerOptParams* opt_params, const LayerParams* 
     opt_params->weight_kernel_stride = params->kernel_h * params->kernel_w;
 }
 
+// Direct 2D convolution of one sample, with the bias added to every output value.
+// Steps for each output channel:
+// 1. Split the output into tiles of 8 rows by 16 columns.
+// 2. For each output value, sum input times weight over all input channels and kernel positions.
+// 3. Skip kernel positions that fall in the zero padding.
+// 4. Write the sum to the output.
+// The tile size keeps the working set small enough for the L1 and L2 caches of the Jetson Nano.
+// The output channel loop is the one split across threads, since each channel writes its own part of the output.
 void conv2d_cpu_opt(const float* __restrict__ input,
                     float* __restrict__ output,
                     const LayerParams* __restrict__ params,
@@ -54,6 +66,7 @@ void conv2d_cpu_opt(const float* __restrict__ input,
     const int stride_h = params->stride_h;
     const int stride_w = params->stride_w;
     
+    // Tile size for the cache blocking described above the function.
     const int tile_h = 8;
     const int tile_w = 16;
     
@@ -84,6 +97,8 @@ void conv2d_cpu_opt(const float* __restrict__ input,
                                     
                                     int kw = 0;
 #ifdef USE_NEON
+                                    // Handles 4 kernel columns at a time with fused multiply add.
+                                    // A group that touches the padding is done one value at a time, because a vector load there would read outside the row.
                                     if (kernel_w >= 4) {
                                         float32x4_t sum_vec = vdupq_n_f32(0.0f);
                                         for (; kw <= kernel_w - 4; kw += 4) {
@@ -103,11 +118,13 @@ void conv2d_cpu_opt(const float* __restrict__ input,
                                                 break;
                                             }
                                         }
+                                        // Adds the 4 lanes together to finish the vector part of the sum.
                                         float sum_array[4];
                                         vst1q_f32(sum_array, sum_vec);
                                         sum += sum_array[0] + sum_array[1] + sum_array[2] + sum_array[3];
                                     }
 #endif
+                                    // Handles the columns the vector loop did not cover, and the whole row when there is no NEON.
                                     for (; kw < kernel_w; ++kw) {
                                         const int iw = ow * stride_w - pad_w + kw;
                                         if (iw >= 0 && iw < w_in) {
@@ -126,6 +143,8 @@ void conv2d_cpu_opt(const float* __restrict__ input,
     }
 }
 
+// Leaky ReLU in place with a slope of 0.01 for negative values, which matches the PyTorch model.
+// Uses vector instructions on groups of 4 values and a scalar loop for the remainder.
 void leaky_relu_cpu_opt(float* __restrict__ tensor, const LayerParams* __restrict__ params) {
     const long total_elements = (long)params->n_out * params->c_out * params->h_out * params->w_out;
     const float leak_factor = 0.01f;
@@ -159,12 +178,15 @@ void leaky_relu_cpu_opt(float* __restrict__ tensor, const LayerParams* __restric
     }
 }
 
+// Sigmoid in place, used on the final layer to turn the logits into probabilities.
 void sigmoid_cpu_opt(float* __restrict__ tensor, long num_elements) {
     for (long i = 0; i < num_elements; ++i) {
         tensor[i] = 1.0f / (1.0f + expf(-tensor[i]));
     }
 }
 
+// One convolution followed by leaky ReLU.
+// The BatchNorm is already folded into the weights, so no separate normalisation step is needed.
 void conv_relu_block(
     const float* input,
     float* output,
@@ -176,6 +198,12 @@ void conv_relu_block(
     leaky_relu_cpu_opt(output, params);
 }
 
+// Instance normalisation in place, done separately for each channel.
+// Steps for each channel:
+// 1. Compute the mean.
+// 2. Compute the variance and then the standard deviation, with a small epsilon to avoid dividing by zero.
+// 3. Normalise and apply the learned scale (gamma) and shift (beta).
+// The sums use double to limit rounding error over a large number of values.
 void instance_norm_cpu_opt(
     float* __restrict__ tensor,
     int num_channels,
@@ -210,11 +238,13 @@ void instance_norm_cpu_opt(
     }
 }
 
+// Frees the weight and bias arrays but not the struct itself.
 void free_conv_with_bias(ConvWithBias* weights) {
     free(weights->weight);
     free(weights->bias);
 }
 
+// Frees the gamma and beta arrays but not the struct itself.
 void free_instance_norm_weights(InstanceNormWeights* weights) {
     free(weights->gamma);
     free(weights->beta);

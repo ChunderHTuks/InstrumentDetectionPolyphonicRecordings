@@ -1,6 +1,11 @@
 #include "utils.h"
 #include <string.h>
 
+// Reads a raw float32 file into a new array.
+// Gets the file size by seeking to the end, then rewinds.
+// Sets the element count to the size divided by sizeof(float).
+// Allocates the array and reads the whole file in one fread.
+// Prints the reason and exits on any failure, so the caller never has to check for NULL.
 float* load_binary_file(const char* path, long* num_elements) {
     FILE* f = fopen(path, "rb");
     if (!f) {
@@ -54,6 +59,9 @@ float* load_binary_file(const char* path, long* num_elements) {
     return data;
 }
 
+// Writes num_elements floats to a raw binary file.
+// Checks that fclose succeeds too, because a failed close can mean the last buffered write was lost.
+// Prints the reason and exits on any failure.
 void write_binary_file(const char* path, const float* data, long num_elements) {
     if (!data) {
         fprintf(stderr, "Null data pointer for file: %s\n", path);

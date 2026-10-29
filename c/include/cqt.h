@@ -15,6 +15,7 @@ typedef float complex cqt_complex;
 #endif
 
 
+// Output of compute_cqt: a row-major bins x frames complex matrix.
 // The struct now uses our common, language-agnostic type
 typedef struct {
     cqt_complex* data;
@@ -28,15 +29,18 @@ extern "C" {
 #endif
 
     // Function prototypes from your cqt.c file
+    // Computes the CQT of audio. Returns freq_bins x time_frames complex values, to be freed with free_cqt_result.
     CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rate,
                           int hop_length, float fmin, int n_bins, int bins_per_octave);
 
+    // Frees the result struct and its data array.
     void free_cqt_result(CQTResult* result);
 
+    // Frees the window cache and kernel cache that compute_cqt builds on first use.
     void cleanup_cqt_caches(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // CQT_PROJECT_CQT_H
+#endif // CQT_PROJECT_CQT_H

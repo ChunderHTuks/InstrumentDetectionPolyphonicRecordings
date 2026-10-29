@@ -7,17 +7,27 @@
 #include <alsa/asoundlib.h>
 #include "sound_acquisition.h"
 
+// Capture settings. Mono 16-bit signed little-endian samples, read in blocks of 1024 frames.
 #define CHANNELS 1
 #define SAMPLE_FORMAT SND_PCM_FORMAT_S16_LE
 #define BUFFER_FRAMES 1024
 
+// Cleared by Ctrl+C or SIGTERM to end the capture loop.
 static volatile int running = 1;
 
+// Stops the capture loop. Only sets the flag, because little else is safe inside a signal handler.
 static void signal_handler(int sig) {
     (void)sig;
     running = 0;
 }
 
+// Records mono audio from an ALSA capture device until Ctrl+C or SIGTERM.
+// Opens the device and sets interleaved 16-bit access, the requested sample rate and one channel.
+// Reads blocks of frames into a small buffer and appends them to a growing int16 buffer.
+// Doubles the growing buffer when it is full, because the recording length is not known in advance.
+// Recovers from an overrun (EPIPE) by preparing the device again.
+// Converts the int16 samples to float by dividing by 32768, giving values in [-1, 1).
+// Returns the float array and sets out_num_samples. Returns NULL on failure.
 float* record_audio_to_float(const char* device_name, unsigned int sample_rate, size_t* out_num_samples) {
     snd_pcm_t *capture_handle;
     snd_pcm_hw_params_t *hw_params;

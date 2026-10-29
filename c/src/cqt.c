@@ -15,6 +15,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+// Cache of Hanning windows, one per window length.
+// Every CQT bin has its own window length, and some lengths repeat, so each one is built only once.
 typedef struct {
     size_t length;
     float* window;
@@ -23,6 +25,8 @@ static WindowCache* window_cache = NULL;
 static size_t window_cache_size = 0;
 static size_t window_cache_capacity = 0;
 
+// Cache of the frequency domain kernels, kept between calls to compute_cqt.
+// The kernels only depend on the fields below, so a later call with the same settings skips the expensive setup.
 typedef struct {
     size_t fft_size;
     int bins_per_octave;
@@ -38,6 +42,8 @@ static void cleanup_kernel_cache(void);
 static void free_resources(CQTResult* result, float* padded_audio, float complex** kernels,
                           int kernel_count, fftwf_plan plan, float complex* temp_buffer);
 
+// Returns the Hanning window for this length, building and caching it on the first request.
+// The cache array doubles in size when it is full.
 static const float* get_hanning_window(size_t length) {
     for (size_t i = 0; i < window_cache_size; i++) {
         if (window_cache[i].length == length)
@@ -66,6 +72,8 @@ static const float* get_hanning_window(size_t length) {
     return window;
 }
 
+// Rounds up to the next power of 2, using the bit smearing trick.
+// FFTW is fastest on power of 2 sizes.
 static size_t next_power_of_2(size_t n) {
     if (n <= 1) return 1;
     n--;
@@ -78,6 +86,13 @@ static size_t next_power_of_2(size_t n) {
     return ++n;
 }
 
+// Builds the time domain kernel for one CQT bin.
+// Steps:
+// 1. The window length is Q cycles of this frequency, so low bins get long windows and high bins get short ones.
+// 2. Multiply the Hanning window by a complex sinusoid at the bin frequency, centred on the window middle.
+// 3. Normalise so the kernel has unit energy, which keeps the bins on the same scale.
+// 4. Copy it into the middle of a zero filled array of length fft_size.
+// A bin whose window does not fit in fft_size gets an all zero kernel.
 static float complex* generate_cqt_kernel(float frequency, float sample_rate, float Q, size_t fft_size) {
     int window_length = (int)roundf(Q * sample_rate / frequency);
     if (window_length <= 0 || window_length > (int)fft_size) {
@@ -114,6 +129,17 @@ static float complex* generate_cqt_kernel(float frequency, float sample_rate, fl
     return kernel;
 }
 
+// Computes the CQT with the direct method.
+// Each frame is transformed with one FFT and then multiplied with the spectral kernel of every bin.
+// Steps:
+// 1. Load the FFTW wisdom file if it exists, so the plans do not need to be measured again.
+// 2. Work out Q, and choose an FFT size that fits the longest kernel (at least 4096).
+// 3. Pad the audio on both sides by half an FFT size, mirrored around the first and last samples, so the first and last frames are centred on the audio edges.
+// 4. Build the kernels, or reuse the cached ones.
+// 5. For every frame, run the FFT and take the dot product with each conjugated kernel. Frames are split across threads.
+// 6. Save the wisdom file and free the temporary buffers.
+// Bins at or above the Nyquist frequency are dropped, so freq_bins in the result can be smaller than n_bins.
+// The result is laid out as [bin][frame] and the caller frees it with free_cqt_result.
 CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rate,
                       int hop_length, float fmin, int n_bins, int bins_per_octave) {
     if (!audio || audio_length == 0 || n_bins <= 0) return NULL;
@@ -125,9 +151,11 @@ CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rat
         printf(" -> No FFTW wisdom file found. A new one will be generated.\n");
         printf("    (This first run will be slower as FFTW optimizes for your hardware)\n");
     }
+    // FFTW_MEASURE tries several algorithms to find the fastest on this hardware, which is why the first run is slow.
     const unsigned FFTW_PLAN_FLAG = FFTW_MEASURE;
 
     int total_bins = n_bins;
+    // Q is the ratio of the centre frequency to the bandwidth, which is the same for every bin.
     float Q = 1.0f / (powf(2.0f, 1.0f / bins_per_octave) - 1.0f);
     size_t min_kernel_len = (size_t)ceilf(Q * sample_rate / fmin);
     size_t fft_size = next_power_of_2(min_kernel_len > 4096 ? min_kernel_len : 4096);
@@ -137,6 +165,7 @@ CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rat
     float* padded_audio = malloc(padded_length * sizeof(float));
     if (!padded_audio) return NULL;
 
+    // Mirrors the audio into the padding on both sides.
     for (size_t i = 0; i < padding; i++) {
         padded_audio[padding - 1 - i] = audio[i + 1];
         padded_audio[padding + audio_length + i] = audio[audio_length - 2 - i];
@@ -163,6 +192,7 @@ CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rat
             free_resources(result, padded_audio, NULL, 0, NULL, NULL);
             return NULL;
         }
+        // Each kernel is moved to the frequency domain once here, so the frame loop only needs a multiplication.
         float complex* temp_kernel_fft = fftwf_malloc(sizeof(float complex) * fft_size);
         fftwf_plan kernel_plan = fftwf_plan_dft_1d(fft_size, (fftwf_complex*)temp_kernel_fft, (fftwf_complex*)temp_kernel_fft, FFTW_FORWARD, FFTW_PLAN_FLAG);
         float fmax = sample_rate / 2.0f;
@@ -187,6 +217,7 @@ CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rat
     fftwf_plan forward_plan = fftwf_plan_dft_1d(fft_size, frame_td, frame_fd, FFTW_FORWARD, FFTW_PLAN_FLAG);
     float inv_fft_size = 1.0f / fft_size;
 
+    // Each thread gets its own buffers, because the threads work on different frames at the same time.
     int max_threads = omp_get_max_threads();
     float complex** private_td_buffers = malloc(max_threads * sizeof(float complex*));
     float complex** private_fd_buffers = malloc(max_threads * sizeof(float complex*));
@@ -211,6 +242,8 @@ CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rat
         for (int bin = 0; bin < total_bins; bin++) {
             float complex total_product = 0.0f + 0.0f * I;
             #ifdef __aarch64__
+                // Computes the sum of frame * conj(kernel) for 4 complex values at a time.
+                // vld2q_f32 splits the real and imaginary parts into separate vectors.
                 float32x4_t sum_re = vdupq_n_f32(0.0f);
                 float32x4_t sum_im = vdupq_n_f32(0.0f);
                 for (size_t i = 0; i < fft_size; i += 4) {
@@ -233,6 +266,7 @@ CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rat
         }
     }
     
+    // Saved after the plans exist, so the next run can load them.
     fftwf_export_wisdom_to_filename(wisdom_file);
 
     for(int i=0; i<max_threads; ++i) {
@@ -250,6 +284,7 @@ CQTResult* compute_cqt(const float* audio, size_t audio_length, float sample_rat
     return result;
 }
 
+// Frees the data array and the struct. Safe to call with NULL.
 void free_cqt_result(CQTResult* result) {
     if (result) {
         if (result->data) fftwf_free(result->data);
@@ -257,6 +292,8 @@ void free_cqt_result(CQTResult* result) {
     }
 }
 
+// Frees the window cache and the kernel cache and releases the FFTW internal data.
+// Call once at the end of the program.
 void cleanup_cqt_caches(void) {
     for (size_t i = 0; i < window_cache_size; i++) {
         if (window_cache[i].window) free(window_cache[i].window);
@@ -271,6 +308,7 @@ void cleanup_cqt_caches(void) {
     fftwf_cleanup();
 }
 
+// The cached kernels can be reused only if they were built with the same settings and cover enough bins.
 static int can_use_cached_kernels(size_t fft_size, int bins_per_octave, float fmin, int n_bins) {
     return kernel_cache.valid && kernel_cache.fft_size == fft_size &&
            kernel_cache.bins_per_octave == bins_per_octave &&
@@ -278,6 +316,7 @@ static int can_use_cached_kernels(size_t fft_size, int bins_per_octave, float fm
            kernel_cache.n_kernels >= n_bins;
 }
 
+// Frees every cached kernel and marks the cache as empty.
 static void cleanup_kernel_cache(void) {
     if (kernel_cache.kernels) {
         for (int i = 0; i < kernel_cache.n_kernels; i++) {
@@ -290,6 +329,8 @@ static void cleanup_kernel_cache(void) {
     kernel_cache.n_kernels = 0;
 }
 
+// Frees whatever has been allocated so far when compute_cqt has to stop early.
+// Any argument can be NULL if that resource does not exist yet.
 static void free_resources(CQTResult* result, float* padded_audio, float complex** kernels,
                           int kernel_count, fftwf_plan plan, float complex* temp_buffer) {
     if (plan) fftwf_destroy_plan(plan);
@@ -307,4 +348,4 @@ static void free_resources(CQTResult* result, float* padded_audio, float complex
     }
     if (padded_audio)
       free(padded_audio);
-}
+}

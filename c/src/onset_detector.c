@@ -4,21 +4,26 @@
 #include <math.h>
 #include "onset_detector.h"
 
+// These must match the values used to compute the CQT, since they convert frame indices to seconds.
 #define CQT_HOP 512
 #define SAMPLE_RATE 44100
 
+// One period in seconds.
+// value holds the average probability for an activity period and the peak flux time for a flux period.
 typedef struct {
     float start_time;
     float end_time;
     float value;
 } TimePeriod;
 
+// Growable array of periods.
 typedef struct {
     TimePeriod* periods;
     int count;
     int capacity;
 } PeriodList;
 
+// Appends a period, doubling the capacity when the array is full.
 static void add_period(PeriodList* list, float start, float end, float value) {
     if (list->count >= list->capacity) {
         list->capacity = (list->capacity == 0) ? 8 : list->capacity * 2;
@@ -30,6 +35,7 @@ static void add_period(PeriodList* list, float start, float end, float value) {
     list->count++;
 }
 
+// Frees the array and resets the list so it can be freed twice safely.
 static void free_period_list(PeriodList* list) {
     if (list && list->periods) {
         free(list->periods);
@@ -39,6 +45,10 @@ static void free_period_list(PeriodList* list) {
     }
 }
 
+// Removes short runs from a 0/1 timeline in place.
+// Any run of <target_state> shorter than <min_duration_frames> is set to <new_state>.
+// A run that starts at frame 0 is kept, to match the Python version.
+// It works from a copy so changes made while scanning do not affect the run detection.
 static void filter_state_timeline(int* timeline, int num_frames, int min_duration_frames, int target_state, int new_state) {
     if (num_frames == 0 || min_duration_frames <= 0) return;
     int* temp_timeline = (int*)malloc(num_frames * sizeof(int));
@@ -66,6 +76,13 @@ static void filter_state_timeline(int* timeline, int num_frames, int min_duratio
     free(temp_timeline);
 }
 
+// Finds the periods where one instrument is active.
+// Steps:
+// 1. Threshold the probabilities into a 0/1 timeline.
+// 2. Fill silent gaps shorter than min_silence_ms.
+// 3. Remove active runs shorter than min_activity_ms.
+// 4. Clear an activity run that starts at frame 0, to avoid false positives from the start of the clip.
+// 5. Find the start and end of each remaining run and store the average probability of the run.
 static PeriodList find_activity_periods(const float* prob_timeline, int num_frames, float threshold, int min_silence_ms, int min_activity_ms) {
     PeriodList list = {NULL, 0, 0};
     if (num_frames == 0) return list;
@@ -114,6 +131,12 @@ static PeriodList find_activity_periods(const float* prob_timeline, int num_fram
     return list;
 }
 
+// Finds the short bursts where the probability rises quickly, which mark a possible note start.
+// Steps:
+// 1. Flux is the rise in probability compared to lag_frames earlier, with negative values set to 0.
+// 2. Frames above flux_threshold are marked as high flux.
+// 3. High flux runs shorter than min_flux_period_frames are removed.
+// 4. Each remaining run is stored with the time of its highest flux frame as the value.
 static PeriodList find_flux_periods(const float* prob_timeline, int num_frames, const OnsetParams* params) {
     PeriodList list = {NULL, 0, 0};
     if (num_frames == 0) return list;
@@ -152,6 +175,10 @@ static PeriodList find_flux_periods(const float* prob_timeline, int num_frames, 
     return list;
 }
 
+// Prints the significant activity periods for every instrument.
+// A period is kept only when its average probability times its share of the clip duration reaches min_significance_score.
+// This drops periods that are both weak and short.
+// prob_timelines is laid out as [frame][instrument] and thresholds holds one value per instrument.
 void find_and_print_activity_periods(const float* prob_timelines, int num_frames, const float* thresholds) {
     const char* instrument_labels[] = {"Piano", "Violin", "Cello", "Viola", "Contrabass", "Clarinet", "Bassoon", "Oboe", "Flute", "Fr Horn", "Trumpet"};
     const int min_activity_ms = 1000;
@@ -200,8 +227,17 @@ void find_and_print_activity_periods(const float* prob_timelines, int num_frames
     for (int i = 0; i < NUM_INSTRUMENTS; ++i) free_period_list(&final_periods[i]);
 }
 
+// Prints one onset time per instrument.
+// Steps for each instrument:
+// 1. Find the activity periods and the flux periods.
+// 2. Keep the activity periods that pass the significance score.
+// 3. For each kept period, take the first flux period that overlaps it.
+// 4. The onset is the earliest peak flux time found across all kept periods.
+// Instruments with no onset are not printed.
 void find_and_print_onsets(const float* prob_timelines, int num_frames, const float* thresholds) {
     const char* instrument_labels[] = {"Piano", "Violin", "Cello", "Viola", "Contrabass", "Clarinet", "Bassoon", "Oboe", "Flute", "Fr Horn", "Trumpet"};
+    // Per instrument values, in the field order of OnsetParams.
+    // They were tuned on the Python version and ported across unchanged.
     OnsetParams params[NUM_INSTRUMENTS] = {
         {2, 0.11, 2, 250, 600, 0.05}, {3, 0.10, 3, 250, 600, 0.01}, {2, 0.07, 2, 250, 500, 0.05},
         {2, 0.07, 2, 250, 500, 0.05}, {2, 0.11, 2, 250, 600, 0.05}, {3, 0.07, 5, 250, 400, 0.05},
